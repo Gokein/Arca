@@ -1,4 +1,5 @@
-﻿#include "framework.h"
+﻿#include <windowsx.h>
+#include "framework.h"
 #include "Arca.h"
 #include <objidl.h>
 #include <gdiplus.h>
@@ -16,15 +17,34 @@ using namespace std;
 #define MAX_LOADSTRING 100
 #define WIN32_LEAN_AND_MEAN  
 
-// Глобальные переменные:
-HINSTANCE hInst;                                // текущий экземпляр
-WCHAR szTitle[MAX_LOADSTRING];                  // Текст строки заголовка
-WCHAR szWindowClass[MAX_LOADSTRING];            // имя класса главного окна
+HINSTANCE hInst;
+WCHAR szTitle[MAX_LOADSTRING];
+WCHAR szWindowClass[MAX_LOADSTRING];
 
-bool g_keyLeftPressed = false;
-bool g_keyRightPressed = false;
-int lives = 3;
-bool gameStarted = false;
+bool gamePaused = false;
+bool stepFrame = false;
+bool isRightMouseDown = false;
+POINT mousePos;
+
+const float PI = 3.14159265f;
+const float cos30 = cosf(30 * PI / 180);
+const float sin30 = sinf(30 * PI / 180);
+const float cos45 = cosf(45 * PI / 180);
+const float sin45 = sinf(45 * PI / 180);
+const float cos60 = cosf(60 * PI / 180);
+const float sin60 = sinf(60 * PI / 180);
+const float cos120 = cosf(120 * PI / 180);
+const float sin120 = sinf(120 * PI / 180);
+const float cos135 = cosf(135 * PI / 180);
+const float sin135 = sinf(135 * PI / 180);
+const float cos150 = cosf(150 * PI / 180);
+const float sin150 = sinf(150 * PI / 180);
+const float cos300 = cosf(300 * PI / 180);
+const float sin300 = sinf(300 * PI / 180);
+const float cos315 = cosf(315 * PI / 180);
+const float sin315 = sinf(315 * PI / 180);
+const float cos330 = cosf(330 * PI / 180);
+const float sin330 = sinf(330 * PI / 180);
 
 class SpriteManager {
 private:
@@ -37,7 +57,7 @@ public:
 
     bool LoadSprite(const std::wstring& path, int id) {
         if (sprites.find(id) != sprites.end()) {
-            return false; 
+            return false;
         }
 
         auto bitmap = std::make_unique<Bitmap>(path.c_str());
@@ -60,149 +80,312 @@ public:
 
 SpriteManager spriteManager;
 
+struct Cords {
+    float x, y;
+};
+
+struct Line {
+    Cords p1, p2;
+};
+
+class Block {
+private:
+    float x, y;
+    float width, height;
+    bool destroyed;
+    int textureId;
+public:
+    Line top;
+    Line right;
+    Line bottom;
+    Line left;
+
+    Block(float x, float y, float width, float height, int textureId)
+        : x(x), y(y), width(width), height(height),
+        textureId(textureId), destroyed(false)
+    {
+        top = { {x, y}, {x + width, y} };
+        right = { {x + width, y}, {x + width, y + height} };
+        bottom = { {x, y + height}, {x + width, y + height} };
+        left = { {x, y}, {x, y + height} };
+    }
+
+    vector<Line> GetActiveSides() const {
+        vector<Line> activeSides;
+        if (!destroyed) {
+            activeSides.push_back(top);
+            activeSides.push_back(right);
+            activeSides.push_back(bottom);
+            activeSides.push_back(left);
+        }
+        return activeSides;
+    }
+    bool IsDestroyed() const {
+        return destroyed;
+    }
+    void Destroy() {
+        destroyed = true;
+    }
+    void Draw(Graphics& graphics) const {
+        if (destroyed) return;
+
+        if (Bitmap* sprite = spriteManager.GetSprite(textureId)) {
+            graphics.DrawImage(sprite, x, y, width, height);
+        }
+        else {
+            SolidBrush brush(Color(255, 150, 150, 150));
+            graphics.FillRectangle(&brush, x, y, width, height);
+
+            Pen pen(Color(255, 255, 0, 0), 2.0f);
+            graphics.DrawLine(&pen, top.p1.x, top.p1.y, top.p2.x, top.p2.y);
+            graphics.DrawLine(&pen, right.p1.x, right.p1.y, right.p2.x, right.p2.y);
+            graphics.DrawLine(&pen, bottom.p1.x, bottom.p1.y, bottom.p2.x, bottom.p2.y);
+            graphics.DrawLine(&pen, left.p1.x, left.p1.y, left.p2.x, left.p2.y);
+        }
+    }
+};
+
 class Ball {
 private:
     float x, y;
     float vx, vy;
     float radius;
-    int spriteId;
-    bool isActive;
+    int textureId;
+    float nextX, nextY;
 
 public:
-    Ball(float startX, float startY, float r, int spriteID = 1)
-        : x(startX), y(startY), radius(r), isActive(true), spriteId(spriteID) {
-        vx = 0.0f;
-        vy = 0.0f;
+    Ball(float startX, float startY, float startVX, float startVY, float r, int texId)
+        : x(startX), y(startY), vx(startVX), vy(startVY), radius(r), textureId(texId),
+        nextX(0), nextY(0) {
     }
 
-    void Draw(Graphics& graphics) {
-        if (!isActive) return;
+    void Update(float deltaTime, const vector<Block>& blocks, int clientWidth, int clientHeight) {
+        if (gamePaused && !stepFrame) return;
 
-        Bitmap* sprite = spriteManager.GetSprite(spriteId);
-        if (sprite) {
-            graphics.DrawImage(sprite, x - radius, y - radius, radius * 2, radius * 2);
+        if (x - radius < 0) {
+            x = radius;
+            vx = -vx;
         }
-        else {
-            SolidBrush brush(Color(255, 255, 255));
-            graphics.FillEllipse(&brush, x - radius, y - radius, radius * 2, radius * 2);
+        else if (x + radius > clientWidth) {
+            x = clientWidth - radius;
+            vx = -vx;
+        }
+        if (y - radius < 0) {
+            y = radius;
+            vy = -vy;
+        }
+        else if (y + radius > clientHeight) {
+            y = clientHeight - radius;
+            vy = -vy;
+        }
+
+        float remainingTime = deltaTime;
+        int collisionCount = 0;
+        const int maxCollisions = 4;
+
+        while (remainingTime > 0 && collisionCount < maxCollisions) {
+            nextX = x + vx * remainingTime;
+            nextY = y + vy * remainingTime;
+
+            const vector<Cords> criticalPoints = {
+                {x, y},
+                {x + radius, y},
+                {x, y - radius},
+                {x - radius, y},
+                {x, y + radius},
+                {x + radius * cos30, y - radius * sin30},
+                {x + radius * cos45, y - radius * sin45},
+                {x + radius * cos60, y - radius * sin60},
+                {x + radius * cos120, y - radius * sin120},
+                {x + radius * cos135, y - radius * sin135},
+                {x + radius * cos150, y - radius * sin150},
+                {x + radius * cos300, y - radius * sin300},  
+                {x + radius * cos315, y - radius * sin315}, 
+                {x + radius * cos330, y - radius * sin330}, 
+                {x - radius * cos30, y + radius * sin30},
+                {x - radius * cos45, y + radius * sin45},
+                {x - radius * cos60, y + radius * sin60},
+                {x - radius * cos60, y - radius * sin60},
+                {x - radius * cos45, y - radius * sin45},
+                {x - radius * cos30, y - radius * sin30} };
+
+            bool collision = false;
+            float minT = FLT_MAX;
+            Cords collisionNormal;
+            const Block* hitBlock = nullptr;
+
+            for (const auto& point : criticalPoints) {
+                float futureX = point.x + (nextX - x);
+                float futureY = point.y + (nextY - y);
+                Line trajectory{ {point.x, point.y}, {futureX, futureY} };
+
+                for (const auto& block : blocks) {
+                    if (block.IsDestroyed()) continue;
+
+                    float expandedLeft = block.left.p1.x;
+                    float expandedTop = block.top.p1.y;
+                    float expandedRight = block.right.p1.x;
+                    float expandedBottom = block.bottom.p1.y;
+
+                    float tIn, tOut;
+                    Cords normal;
+                    if (LiangBarsky(expandedLeft, expandedTop, expandedRight, expandedBottom,
+                        trajectory.p1.x, trajectory.p1.y, trajectory.p2.x, trajectory.p2.y,
+                        tIn, tOut, normal) && tIn < minT) {
+                        minT = tIn;
+                        collisionNormal = normal;
+                        hitBlock = &block;
+                        collision = true;
+                    }
+                }
+            }
+
+            if (collision && minT >= 0 && minT <= 1.0f) {
+                float collisionTime = minT * remainingTime;
+                x += vx * collisionTime;
+                y += vy * collisionTime;
+                Reflect(collisionNormal);
+                remainingTime -= collisionTime;
+                collisionCount++;
+
+                if (hitBlock) const_cast<Block*>(hitBlock)->Destroy();
+            }
+            else {
+                x = nextX;
+                y = nextY;
+                remainingTime = 0;
+            }
         }
     }
 
-    void Update() {
-        if (!isActive) return;
-        x += vx;
-        y += vy;
-    }
+    static bool LiangBarsky(float edgeL, float edgeT, float edgeR, float edgeB,
+        float x0, float y0, float x1, float y1,
+        float& tIn, float& tOut, Cords& normal) {
 
-    float GetX() const { return x; }
-    float GetY() const { return y; }
-    float GetRadius() const { return radius; }
-    float GetVX() const { return vx; }
-    float GetVY() const { return vy; }
-    void SetVX(float newVX) { vx = newVX; }
-    void SetVY(float newVY) { vy = newVY; }
-};
+        float dx = x1 - x0;
+        float dy = y1 - y0;
+        tIn = 0.0f;
+        tOut = 1.0f;
+        bool visible = false;
 
-
-class Brick {
-private:
-    float x, y;
-    float width, height;
-    int spriteId;
-    bool isDestroyed;
-    int hitPoints;
-
-public:
-    Brick(float posX, float posY, float w, float h, int spriteID = 1001, int hp = 1)
-        : x(posX), y(posY), width(w), height(h), spriteId(spriteID),
-        isDestroyed(false), hitPoints(hp) {
-    }
-
-    void Draw(Graphics& graphics) {
-        if (isDestroyed) return;
-
-        Bitmap* sprite = spriteManager.GetSprite(spriteId);
-        if (sprite) {
-            graphics.DrawImage(sprite, x, y, width, height);
-        }
-        else {
-            Color brickColor = hitPoints > 1 ? Color(255, 0, 0) : Color(0, 255, 0);
-            SolidBrush brush(brickColor);
-            graphics.FillRectangle(&brush, x, y, width, height);
-        }
-    }
-
-    bool CheckCollision(Ball& ball) {
-        if (isDestroyed) return false;
-
-        if (ball.GetX() + ball.GetRadius() > x &&
-            ball.GetX() - ball.GetRadius() < x + width &&
-            ball.GetY() + ball.GetRadius() > y &&
-            ball.GetY() - ball.GetRadius() < y + height) {
-
-            hitPoints--;
-            if (hitPoints <= 0) {
-                Destroy();
+        auto clip = [&](float p, float q, Cords n) {
+            if (p == 0) {
+                if (q < 0) return false;
+            }
+            else {
+                float t = q / p;
+                if (p < 0) {
+                    if (t > tIn) {
+                        tIn = t;
+                        normal = n;
+                    }
+                }
+                else {
+                    if (t < tOut) tOut = t;
+                }
             }
             return true;
+            };
+
+        if (clip(-dx, x0 - edgeL, { -1, 0 }) &&
+            clip(dx, edgeR - x0, { 1, 0 }) &&
+            clip(-dy, y0 - edgeT, { 0, -1 }) &&
+            clip(dy, edgeB - y0, { 0, 1 })) {
+
+            visible = (tIn <= tOut) && (tIn >= 0) && (tIn <= 1.0f);
         }
-        return false;
+
+        return visible;
     }
 
-    void Destroy() {
-        isDestroyed = true;
-    }
+    void Draw(Graphics& graphics) const {
+        float drawX = x - radius;
+        float drawY = y - radius;
+        float diameter = 2 * radius;
 
-    bool IsDestroyed() const { return isDestroyed; }
-    float GetX() const { return x; }
-    float GetY() const { return y; }
-    float GetWidth() const { return width; }
-    float GetHeight() const { return height; }
-};
-
-class Racket {
-private:
-    float x, y;
-    float width, height;
-    int spriteId;
-    bool isActive;
-
-public:
-    Racket(float startX, float startY, float w, float h, int spriteID = 2001)
-        : x(startX), y(startY), width(w), height(h), spriteId(spriteID), isActive(true) {
-    }
-
-    void Draw(Graphics& graphics) {
-        if (!isActive) return;
-
-        Bitmap* sprite = spriteManager.GetSprite(spriteId);
-        if (sprite) {
-            graphics.DrawImage(sprite, x, y, width, height);
+        if (Bitmap* sprite = spriteManager.GetSprite(textureId)) {
+            graphics.DrawImage(sprite, drawX, drawY, diameter, diameter);
         }
         else {
-            SolidBrush brush(Color(255, 255, 255));
-            graphics.FillRectangle(&brush, x, y, width, height);
+            SolidBrush brush(Color(255, 255, 255, 255));
+            graphics.FillEllipse(&brush, drawX, drawY, diameter, diameter);
         }
     }
 
-    void Update(float newX) {
-        x = newX - width / 2;
+    vector<Line> PredictTrajectory(float deltaTime, const vector<Block>& blocks) const {
+        vector<Line> trajectoryLines;
+
+        const vector<Cords> criticalPoints = {
+            {x, y},
+            {x + radius, y},
+            {x, y - radius},
+            {x - radius, y},
+            {x, y + radius},
+            {x + radius * cos30, y - radius * sin30},
+            {x + radius * cos45, y - radius * sin45},
+            {x + radius * cos60, y - radius * sin60},
+            {x + radius * cos120, y - radius * sin120},
+            {x + radius * cos135, y - radius * sin135},
+            {x + radius * cos150, y - radius * sin150},
+            {x + radius * cos300, y - radius * sin300}, 
+            {x + radius * cos315, y - radius * sin315},  
+            {x + radius * cos330, y - radius * sin330},  
+            {x - radius * cos30, y + radius * sin30},
+            {x - radius * cos45, y + radius * sin45},
+            {x - radius * cos60, y + radius * sin60},
+            {x - radius * cos60, y - radius * sin60},
+            {x - radius * cos45, y - radius * sin45},
+            {x - radius * cos30, y - radius * sin30}
+        };
+      
+
+
+        for (const auto& point : criticalPoints) {
+            Cords futurePoint = {
+                point.x + vx * deltaTime,
+                point.y + vy * deltaTime
+            };
+            trajectoryLines.push_back({ point, futurePoint });
+        }
+        return trajectoryLines;
     }
 
     float GetX() const { return x; }
     float GetY() const { return y; }
-    float GetWidth() const { return width; }
-    float GetHeight() const { return height; }
+    float GetNextX() const { return nextX; }
+    float GetNextY() const { return nextY; }
+
+    void MoveTo(float targetX, float targetY) {
+        x = targetX;
+        y = targetY;
+    }
+
+private:
+    void Reflect(const Cords& normal) {
+        float length = sqrt(normal.x * normal.x + normal.y * normal.y);
+        if (length > 0) {
+            float nx = normal.x / length;
+            float ny = normal.y / length;
+            float dot = vx * nx + vy * ny;
+            vx -= 2 * dot * nx;
+            vy -= 2 * dot * ny;
+        }
+    }
 };
 
-Racket* pRacket = nullptr;
-vector<Brick> bricks;
-Ball* pBall = nullptr;
+Ball ball(100.0f, 100.0f, 300.0f, 300.0f, 15.0f, 1);
+vector<Block> blocks;
 
-ATOM                MyRegisterClass(HINSTANCE hInstance);
-BOOL                InitInstance(HINSTANCE, int);
-LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
+ULONGLONG lastFrameTime = 0;
+float deltaTime = 0.0f;
+int frames = 0;
+ULONGLONG lastFPSUpdate = 0;
+int currentFPS = 0;
+
+ATOM MyRegisterClass(HINSTANCE hInstance);
+BOOL InitInstance(HINSTANCE, int);
+LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -226,7 +409,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     spriteManager.LoadSprite(L"assets/brick.jpg", 1001);
     spriteManager.LoadSprite(L"assets/racket.jpg", 2001);
 
-
     if (!InitInstance(hInstance, nCmdShow))
     {
         return FALSE;
@@ -236,6 +418,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
+    lastFrameTime = GetTickCount64();
+    lastFPSUpdate = lastFrameTime;
+
     while (msg.message != WM_QUIT)
     {
         if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
@@ -248,6 +433,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         }
         else
         {
+            ULONGLONG currentTime = GetTickCount64();
+            deltaTime = (currentTime - lastFrameTime) / 1000.0f;
+            lastFrameTime = currentTime;
+
+            frames++;
+            if (currentTime - lastFPSUpdate >= 1000) {
+                currentFPS = frames;
+                frames = 0;
+                lastFPSUpdate = currentTime;
+            }
+
+            HWND hWnd = GetActiveWindow();
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
+
             Sleep(1);
         }
     }
@@ -255,6 +455,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     spriteManager.Clear();
     GdiplusShutdown(gdiplusToken);
     return (int)msg.wParam;
+}
+
+void CreateBlocks() {
+    blocks.emplace_back(200.0f, 200.0f, 120.0f, 60.0f, 1001);
+    blocks.emplace_back(400.0f, 200.0f, 120.0f, 60.0f, 1001);
+    blocks.emplace_back(600.0f, 200.0f, 120.0f, 60.0f, 1001);
+    blocks.emplace_back(800.0f, 200.0f, 120.0f, 60.0f, 1001);
 }
 
 ATOM MyRegisterClass(HINSTANCE hInstance)
@@ -292,21 +499,11 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
         return FALSE;
     }
 
-    SetTimer(hWnd, 1, 8, NULL); 
+    SetTimer(hWnd, 1, 16, NULL);
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 
     return TRUE;
-}
-
-void ResetGameObjects(int screenWidth, int screenHeight) {
-    if (pBall) {
-        delete pBall;
-        pBall = new Ball(screenWidth / 2, screenHeight - 100, 20, 1);
-    }
-    if (pRacket) {
-        pRacket->Update(screenWidth / 2);
-    }
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -314,34 +511,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case WM_CREATE: {
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-        pBall = new Ball(screenWidth / 2, screenHeight - 100, 20, 1);
-        pRacket = new Racket(screenWidth / 2 - 50, screenHeight - 30, 100, 15, 2001);
-        gameStarted = false;
-
-        int brickWidth = 128;
-        int brickHeight = 64;
-        int brickSpacing = 10;
-        int numCols = 10;
-        int numRows = 5;
-        int gridWidth = numCols * brickWidth + (numCols - 1) * brickSpacing;
-        int gridHeight = numRows * brickHeight + (numRows - 1) * brickSpacing;
-        int startX = (screenWidth - gridWidth) / 2;
-        int startY = (screenHeight - gridHeight) / 2.5;
-
-        for (int row = 0; row < numRows; row++) {
-            for (int col = 0; col < numCols; col++) {
-                bricks.emplace_back(
-                    startX + col * (brickWidth + brickSpacing),
-                    startY + row * (brickHeight + brickSpacing),
-                    brickWidth, brickHeight,
-                    1001,
-                    row % 2 + 1
-                );
-            }
-        }
+        CreateBlocks();
         break;
     }
     case WM_PAINT: {
@@ -358,21 +528,71 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         SolidBrush bgBrush(Color(0, 0, 0));
         graphics.FillRectangle(&bgBrush, 0, 0, rect.right, rect.bottom);
 
-
-
         FontFamily fontFamily(L"Arial");
-        Font font(&fontFamily, 24, FontStyleRegular, UnitPixel);
+        Font font(&fontFamily, 16, FontStyleRegular, UnitPixel);
         SolidBrush whiteBrush(Color(255, 255, 255));
+        PointF pointF(10.0f, 10.0f);
 
-        wstring livesText = L"Lives: " + to_wstring(lives);
-        PointF textPoint(rect.right / 2.0f - 50, 10.0f);
-        graphics.DrawString(livesText.c_str(), -1, &font, textPoint, &whiteBrush);
+        wstring fpsStr = L"FPS: " + to_wstring(currentFPS);
+        graphics.DrawString(fpsStr.c_str(), -1, &font, pointF, &whiteBrush);
 
-        for (auto& brick : bricks) {
-            brick.Draw(graphics);
+        pointF.Y += 20.0f;
+        wstring deltaStr = L"Delta: " + to_wstring(deltaTime);
+        graphics.DrawString(deltaStr.c_str(), -1, &font, pointF, &whiteBrush);
+
+        if (gamePaused) {
+            pointF.Y += 40.0f;
+            wstring pauseStr = L"PAUSED (Press 'P' to continue, 'S' to step)";
+            graphics.DrawString(pauseStr.c_str(), -1, &font, pointF, &whiteBrush);
         }
-        if (pRacket) pRacket->Draw(graphics);
-        if (pBall) pBall->Draw(graphics);
+
+        for (auto& block : blocks) {
+            block.Draw(graphics);
+        }
+
+        ball.Draw(graphics);
+
+        if (gamePaused) {
+            auto trajectoryLines = ball.PredictTrajectory(deltaTime, blocks);
+
+            Pen trajectoryPen(Color(255, 0, 255, 0), 3.0f); // Зелёный
+            Pen collisionPen(Color(255, 255, 0, 255), 2.0f);
+
+            for (const auto& line : trajectoryLines) {
+                graphics.DrawLine(&trajectoryPen, line.p1.x, line.p1.y, line.p2.x, line.p2.y);
+            }
+
+            SolidBrush pointBrush(Color(255, 0, 0, 255)); // Синий
+
+            for (const auto& line : trajectoryLines) {
+                graphics.FillEllipse(&pointBrush, (REAL)(line.p1.x - 2), (REAL)(line.p1.y - 2), (REAL)4, (REAL)4);
+            }
+
+            SolidBrush collisionBrush(Color(255, 255, 0, 0));
+            for (const auto& line : trajectoryLines) {
+                for (const auto& block : blocks) {
+                    if (block.IsDestroyed()) continue;
+
+                    for (const auto& blockSide : block.GetActiveSides()) {
+                        float tIn, tOut;
+                        Cords normal;
+                        if (Ball::LiangBarsky(blockSide.p1.x, blockSide.p1.y,
+                            blockSide.p2.x, blockSide.p2.y,
+                            line.p1.x, line.p1.y,
+                            line.p2.x, line.p2.y,
+                            tIn, tOut, normal)) {
+                            float collisionX = line.p1.x + (line.p2.x - line.p1.x) * tIn;
+                            float collisionY = line.p1.y + (line.p2.y - line.p1.y) * tIn;
+                            graphics.FillEllipse(&collisionBrush,
+                                (REAL)(collisionX - 3), (REAL)(collisionY - 3),
+                                (REAL)6, (REAL)6);
+                        }
+
+                    }
+                }
+            }
+
+        }
 
         BitBlt(hdc, 0, 0, rect.right, rect.bottom, hdcMem, 0, 0, SRCCOPY);
 
@@ -383,118 +603,60 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         EndPaint(hWnd, &ps);
         break;
     }
-    case WM_KEYDOWN:
-        if (wParam == VK_SPACE && !gameStarted) {
-            gameStarted = true;
-            if (pBall) {
-                float direction = (rand() % 2) ? 1.0f : -1.0f;
-                pBall->SetVX((rand() % 4 + 1.0f) * direction);
-                pBall->SetVY(-3.0f);
-            }
-        }
-        if (wParam == 'A' || wParam == VK_LEFT) {
-            g_keyLeftPressed = true;
-        }
-        else if (wParam == 'D' || wParam == VK_RIGHT) {
-            g_keyRightPressed = true;
+
+    case WM_RBUTTONDOWN: {
+        isRightMouseDown = true;
+        mousePos.x = GET_X_LPARAM(lParam);
+        mousePos.y = GET_Y_LPARAM(lParam);
+        ball.MoveTo(static_cast<float>(mousePos.x), static_cast<float>(mousePos.y));
+        break;
+    }
+    case WM_RBUTTONUP: {
+        isRightMouseDown = false;
+        break;
+    }
+    case WM_MOUSEMOVE: {
+        if (isRightMouseDown) {
+            mousePos.x = GET_X_LPARAM(lParam);
+            mousePos.y = GET_Y_LPARAM(lParam);
         }
         break;
+    }
 
+    case WM_KEYDOWN:
+        if (wParam == 'P') {
+            gamePaused = !gamePaused;
+        }
+        else if (wParam == 'S') {
+            if (gamePaused) {
+                stepFrame = true;
+            }
+        }
+        break;
     case WM_KEYUP:
-        if (wParam == 'A' || wParam == VK_LEFT) {
-            g_keyLeftPressed = false;
-        }
-        else if (wParam == 'D' || wParam == VK_RIGHT) {
-            g_keyRightPressed = false;
-        }
         break;
 
     case WM_TIMER: {
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+        if (!gamePaused || stepFrame) {
+            RECT clientRect;
+            GetClientRect(hWnd, &clientRect);
 
-
-        if (pBall && gameStarted) {
-            pBall->Update();
-
-            if (pBall->GetX() - pBall->GetRadius() <= 0 ||
-                pBall->GetX() + pBall->GetRadius() >= screenWidth) {
-                pBall->SetVX(-pBall->GetVX());
+            if (isRightMouseDown) {
+                float targetX = static_cast<float>(mousePos.x);
+                float targetY = static_cast<float>(mousePos.y);
+                ball.MoveTo(targetX, targetY);
             }
-            if (pBall->GetY() - pBall->GetRadius() <= 0) {
-                pBall->SetVY(-pBall->GetVY());
+            else {
+                ball.Update(deltaTime, blocks, clientRect.right, clientRect.bottom);
             }
 
-            if (pBall->GetY() - pBall->GetRadius() > screenHeight) {
-                lives--;
-                gameStarted = false;
-                ResetGameObjects(screenWidth, screenHeight);
+            if (stepFrame) {
+                stepFrame = false;
             }
-
-
-            if (pRacket && pBall->GetY() + pBall->GetRadius() >= pRacket->GetY() &&
-                pBall->GetY() - pBall->GetRadius() <= pRacket->GetY() + pRacket->GetHeight() &&
-                pBall->GetX() + pBall->GetRadius() >= pRacket->GetX() &&
-                pBall->GetX() - pBall->GetRadius() <= pRacket->GetX() + pRacket->GetWidth()) {
-
-                pBall->SetVY(-abs(pBall->GetVY()) * (1.01f + (rand() % 5 / 100.0f)));
-                pBall->SetVX(pBall->GetVX() * (1.01f + (rand() % 5 / 100.0f)));
-            }
-            for (auto& brick : bricks) {
-                if (brick.CheckCollision(*pBall)) {
-                    float ballLeft = pBall->GetX() - pBall->GetRadius();
-                    float ballRight = pBall->GetX() + pBall->GetRadius();
-                    float ballTop = pBall->GetY() - pBall->GetRadius();
-                    float ballBottom = pBall->GetY() + pBall->GetRadius();
-
-                    float brickLeft = brick.GetX();
-                    float brickRight = brick.GetX() + brick.GetWidth();
-                    float brickTop = brick.GetY();
-                    float brickBottom = brick.GetY() + brick.GetHeight();
-
-                    float overlapLeft = ballRight - brickLeft;
-                    float overlapRight = brickRight - ballLeft;
-                    float overlapTop = ballBottom - brickTop;
-                    float overlapBottom = brickBottom - ballTop;
-
-                    float minOverlap = min(min(overlapLeft, overlapRight), min(overlapTop, overlapBottom));
-
-                    if (minOverlap == overlapLeft || minOverlap == overlapRight) {
-                        pBall->SetVX(-pBall->GetVX()); 
-                    }
-                    else {
-                        pBall->SetVY(-pBall->GetVY()); 
-                    }
-                    break;
-                }
-            }
-
-            InvalidateRect(hWnd, NULL, FALSE);
-        }
-        if (g_keyLeftPressed || g_keyRightPressed) {
-            int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-            float currentCenterX = pRacket->GetX() + pRacket->GetWidth() / 2;
-            float step = 15.0f;
-
-            if (g_keyLeftPressed) {
-                currentCenterX -= step;
-                if (currentCenterX < pRacket->GetWidth() / 2) {
-                    currentCenterX = pRacket->GetWidth() / 2;
-                }
-            }
-            if (g_keyRightPressed) {
-                currentCenterX += step;
-                if (currentCenterX > screenWidth - pRacket->GetWidth() / 2) {
-                    currentCenterX = screenWidth - pRacket->GetWidth() / 2;
-                }
-            }
-            pRacket->Update(currentCenterX);
         }
         break;
     }
     case WM_DESTROY: {
-        delete pBall;
-        delete pRacket;
         spriteManager.Clear();
         KillTimer(hWnd, 1);
         PostQuitMessage(0);
